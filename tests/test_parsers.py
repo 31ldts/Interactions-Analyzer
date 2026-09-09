@@ -7,9 +7,23 @@ parser functions directly and in isolation, including an IChem case using
 hand-built line content — the Fase 0 notes explicitly flagged that no
 IChem sample data was available among the provided files, so
 `parse_ichem_file` had 0% dedicated coverage until now.
+
+Extended for the PDBe-API Arpeggio schema and the IChem template feature
+(see plan-accion-modularizacion-pickit.md, "processed schema" sub-task):
+`flatten_arpeggio_content` / `is_raw_arpeggio_record` / `parse_ligand_key`
+(common.py), `parse_arpeggio_file_pdbe_template` (arpeggio.py), and
+`parse_ichem_file`'s new `interaction_list` parameter.
 """
 
-from pickit.parsers.common import get_protein_ligand, modify_cell, validate_string
+from pickit.parsers.arpeggio import parse_arpeggio_file_pdbe_template
+from pickit.parsers.common import (
+    flatten_arpeggio_content,
+    get_protein_ligand,
+    is_raw_arpeggio_record,
+    modify_cell,
+    parse_ligand_key,
+    validate_string,
+)
 from pickit.parsers.ichem import parse_ichem_file
 
 
@@ -144,3 +158,280 @@ class TestParseIchemFile:
         assert aa == {"HIS 41-A": 0}
         # subunits_set is only populated in the not-subunit branch
         assert subunits_set == set()
+
+
+class TestParseIchemFileTemplate:
+    """`interaction_list=None` (the default) must reproduce the exact
+    pre-template behavior above; passing a list restricts which lines are
+    kept and which numeric codes get assigned, mirroring the role
+    `interaction_list` plays for the Arpeggio parsers."""
+
+    LINES = [
+        "Hydrophobic|CA|x|HIS 41-A|O1|x|x|x|x|x",
+        "Ionic_PROT|CB|x|ASN 142-A|N1|x|x|x|x|x",
+    ]
+
+    def test_no_template_keeps_every_line_with_default_codes(self):
+        matrix, aa, cont, subunits_set = parse_ichem_file(
+            content=self.LINES,
+            index=0,
+            files=["complex1.txt"],
+            subunits_set=set(),
+            cont=0,
+            matrix=[],
+            aa={},
+            protein=True,
+            ligand=True,
+            subunit=False,
+        )
+        # "Ionic_PROT" is INTERACTION_LABELS[5] -> code 6, same as before
+        # this parameter existed.
+        assert aa == {"HIS 41": 0, "ASN 142": 1}
+        assert matrix == [["1 |CA-O1(A)|"], ["6 |CB-N1(A)|"]]
+
+    def test_template_drops_lines_outside_the_list(self):
+        matrix, aa, cont, subunits_set = parse_ichem_file(
+            content=self.LINES,
+            index=0,
+            files=["complex1.txt"],
+            subunits_set=set(),
+            cont=0,
+            matrix=[],
+            aa={},
+            protein=True,
+            ligand=True,
+            subunit=False,
+            interaction_list=["Hydrophobic"],
+        )
+        # The Ionic_PROT line is dropped entirely -> no ASN 142 row at all.
+        assert aa == {"HIS 41": 0}
+        assert matrix == [["1 |CA-O1(A)|"]]
+
+    def test_template_reorders_numeric_codes(self):
+        # With a restricted/reordered template, codes follow the template's
+        # own order rather than the full INTERACTION_LABELS order.
+        matrix, aa, cont, subunits_set = parse_ichem_file(
+            content=self.LINES,
+            index=0,
+            files=["complex1.txt"],
+            subunits_set=set(),
+            cont=0,
+            matrix=[],
+            aa={},
+            protein=True,
+            ligand=True,
+            subunit=False,
+            interaction_list=["Ionic_PROT", "Hydrophobic"],
+        )
+        assert matrix[aa["HIS 41"]][0] == "2 |CA-O1(A)|"
+        assert matrix[aa["ASN 142"]][0] == "1 |CB-N1(A)|"
+
+    def test_empty_template_drops_every_line(self):
+        matrix, aa, cont, subunits_set = parse_ichem_file(
+            content=self.LINES,
+            index=0,
+            files=["complex1.txt"],
+            subunits_set=set(),
+            cont=0,
+            matrix=[],
+            aa={},
+            protein=True,
+            ligand=True,
+            subunit=False,
+            interaction_list=[],
+        )
+        assert matrix == []
+        assert aa == {}
+
+
+class TestIsRawArpeggioRecord:
+    def test_raw_schema_record_is_detected(self):
+        assert is_raw_arpeggio_record({"interacting_entities": "INTER", "bgn": {}, "end": {}}) is True
+
+    def test_processed_schema_record_is_not_raw(self):
+        record = {"ligand_atoms": ["N19"], "interaction_type": "atom-atom", "end": {}}
+        assert is_raw_arpeggio_record(record) is False
+
+
+class TestParseLigandKey:
+    def test_splits_chain_resnum_and_code(self):
+        assert parse_ligand_key("A_954_A3M") == {
+            "chain_id": "A",
+            "author_residue_number": 954,
+            "chem_comp_id": "A3M",
+        }
+
+    def test_ligand_code_can_itself_contain_underscores(self):
+        assert parse_ligand_key("B_12_A_3M") == {
+            "chain_id": "B",
+            "author_residue_number": 12,
+            "chem_comp_id": "A_3M",
+        }
+
+    def test_malformed_key_raises_value_error(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            parse_ligand_key("not_a_key")
+
+
+class TestFlattenArpeggioContent:
+    def test_flat_list_shape_is_passed_through_with_no_ligand_context(self):
+        content = [{"interacting_entities": "INTER", "bgn": {}, "end": {}}]
+        flat = flatten_arpeggio_content(content)
+        assert flat == [(content[0], None)]
+
+    def test_dict_by_ligand_key_shape_resolves_context_from_the_key(self):
+        record = {"ligand_atoms": ["N19"], "interaction_type": "atom-atom", "end": {"chem_comp_id": "GLU"}}
+        content = {"A_954_A3M": [record]}
+        flat = flatten_arpeggio_content(content)
+        assert flat == [(record, {"chain_id": "A", "author_residue_number": 954, "chem_comp_id": "A3M"})]
+
+    def test_dict_by_pdb_id_shape_resolves_context_from_the_nested_ligand(self):
+        ligand_ctx = {"chain_id": "A", "author_residue_number": 954, "chem_comp_id": "A3M"}
+        record = {"ligand_atoms": ["N19"], "interaction_type": "atom-atom", "end": {"chem_comp_id": "GLU"}}
+        content = {"1n1m": [{"ligand": ligand_ctx, "interactions": [record]}]}
+        flat = flatten_arpeggio_content(content)
+        assert flat == [(record, ligand_ctx)]
+
+    def test_empty_ligand_entry_list_is_skipped_without_error(self):
+        content = {"A_954_A3M": []}
+        assert flatten_arpeggio_content(content) == []
+
+
+class TestParseArpeggioFilePdbeTemplate:
+    INTERACTION_LIST = ["hbond", "hydrophobic", "vdw_clash"]
+
+    def _record(self, chem_comp_id="GLU", details="hbond", ligand_atoms=None, atom_names=None):
+        return {
+            "ligand_atoms": ligand_atoms or ["N19"],
+            "interaction_type": "atom-atom",
+            "interaction_details": [details] if isinstance(details, str) else details,
+            "end": {
+                "chain_id": "A",
+                "author_residue_number": 205,
+                "chem_comp_id": chem_comp_id,
+                "atom_names": atom_names or ["OE2"],
+            },
+        }
+
+    def _ligand_context(self, chem_comp_id="A3M"):
+        return {"chain_id": "A", "author_residue_number": 954, "chem_comp_id": chem_comp_id}
+
+    def test_single_record_populates_matrix_and_ligand_code(self):
+        records = [(self._record(), self._ligand_context())]
+        matrix, ligand_code, aa, cont, subunits_set = parse_arpeggio_file_pdbe_template(
+            records=records,
+            index=0,
+            files=["f.json"],
+            subunits_set=set(),
+            cont=0,
+            matrix=[],
+            aa={},
+            exclude_rules=[{"end": {"chem_comp_id": "HOH"}}],
+            interaction_list=self.INTERACTION_LIST,
+            protein=True,
+            ligand=True,
+            subunit=False,
+        )
+        assert ligand_code == "A3M"
+        assert aa == {"GLU 205": 0}
+        assert matrix == [["1 |OE2-N19(A)|"]]
+        assert subunits_set == {"A"}
+
+    def test_excluded_record_is_dropped(self):
+        records = [(self._record(chem_comp_id="HOH"), self._ligand_context())]
+        matrix, ligand_code, aa, cont, subunits_set = parse_arpeggio_file_pdbe_template(
+            records=records,
+            index=0,
+            files=["f.json"],
+            subunits_set=set(),
+            cont=0,
+            matrix=[],
+            aa={},
+            exclude_rules=[{"end": {"chem_comp_id": "HOH"}}],
+            interaction_list=self.INTERACTION_LIST,
+            protein=True,
+            ligand=True,
+            subunit=False,
+        )
+        assert matrix == []
+        assert aa == {}
+
+    def test_raw_schema_records_are_skipped_not_double_counted(self):
+        raw_record = {"interacting_entities": "INTER", "bgn": {}, "end": {}}
+        records = [(raw_record, None), (self._record(), self._ligand_context())]
+        matrix, ligand_code, aa, cont, subunits_set = parse_arpeggio_file_pdbe_template(
+            records=records,
+            index=0,
+            files=["f.json"],
+            subunits_set=set(),
+            cont=0,
+            matrix=[],
+            aa={},
+            exclude_rules=[{"end": {"chem_comp_id": "HOH"}}],
+            interaction_list=self.INTERACTION_LIST,
+            protein=True,
+            ligand=True,
+            subunit=False,
+        )
+        assert aa == {"GLU 205": 0}
+
+    def test_interaction_not_in_vocabulary_is_dropped_but_residue_still_created(self):
+        # Mirrors parse_arpeggio_file_template's own behavior: an unlisted
+        # interaction string doesn't populate a cell, but the residue row is
+        # still created since the record itself wasn't excluded.
+        records = [(self._record(details="not_in_vocabulary"), self._ligand_context())]
+        matrix, ligand_code, aa, cont, subunits_set = parse_arpeggio_file_pdbe_template(
+            records=records,
+            index=0,
+            files=["f.json"],
+            subunits_set=set(),
+            cont=0,
+            matrix=[],
+            aa={},
+            exclude_rules=[{"end": {"chem_comp_id": "HOH"}}],
+            interaction_list=self.INTERACTION_LIST,
+            protein=True,
+            ligand=True,
+            subunit=False,
+        )
+        assert aa == {"GLU 205": 0}
+        assert matrix == [[""]]
+
+    def test_subunit_true_keeps_chain_in_residue_label(self):
+        records = [(self._record(), self._ligand_context())]
+        matrix, ligand_code, aa, cont, subunits_set = parse_arpeggio_file_pdbe_template(
+            records=records,
+            index=0,
+            files=["f.json"],
+            subunits_set=set(),
+            cont=0,
+            matrix=[],
+            aa={},
+            exclude_rules=[{"end": {"chem_comp_id": "HOH"}}],
+            interaction_list=self.INTERACTION_LIST,
+            protein=True,
+            ligand=True,
+            subunit=True,
+        )
+        assert aa == {"GLU 205-A": 0}
+        assert matrix == [["1 |OE2-N19|"]]
+
+    def test_multiple_atoms_are_comma_joined(self):
+        records = [(self._record(atom_names=["OE1", "OE2"], ligand_atoms=["N19", "C20"]), self._ligand_context())]
+        matrix, ligand_code, aa, cont, subunits_set = parse_arpeggio_file_pdbe_template(
+            records=records,
+            index=0,
+            files=["f.json"],
+            subunits_set=set(),
+            cont=0,
+            matrix=[],
+            aa={},
+            exclude_rules=[{"end": {"chem_comp_id": "HOH"}}],
+            interaction_list=self.INTERACTION_LIST,
+            protein=True,
+            ligand=True,
+            subunit=False,
+        )
+        assert matrix == [["1 |OE1,OE2-N19,C20(A)|"]]

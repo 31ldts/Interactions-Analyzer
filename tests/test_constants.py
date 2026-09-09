@@ -46,9 +46,16 @@ def test_amino_acid_codes_are_three_letter_uppercase():
 
 
 def test_default_template_file_name():
-    # Documents the default used by analyze_files(template_file=...); the
-    # caller can always override it with an explicit path.
-    assert constants.DEFAULT_TEMPLATE_FILE == "template.json"
+    # Documents the defaults used by analyze_files(template_file=...); the
+    # caller can always override them with an explicit path.
+    #
+    # Renamed from a single "template.json" once IChem got its own default
+    # template too: DEFAULT_ARPEGGIO_TEMPLATE_FILE is the new canonical
+    # name, DEFAULT_TEMPLATE_FILE is kept only as a backward-compatible
+    # alias pointing at the same value.
+    assert constants.DEFAULT_ARPEGGIO_TEMPLATE_FILE == "template_arpeggio.json"
+    assert constants.DEFAULT_TEMPLATE_FILE == constants.DEFAULT_ARPEGGIO_TEMPLATE_FILE
+    assert constants.DEFAULT_ICHEM_TEMPLATE_FILE == "template_ichem.json"
 
 
 def test_reexported_from_analyze_interactions():
