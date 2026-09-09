@@ -137,13 +137,12 @@ AMINO_ACID_CODES = [
     "VAL",
 ]
 
-# Default template file used to restrict/annotate interaction labels when
-# parsing Arpeggio output via `analyze_files(..., template_file=...)`.
-# This is only a DEFAULT: the caller can always override it by passing an
-# explicit `template_file` path. Wired up in the extraction of
-# parsers/arpeggio.py + io_mixin.py (paso 7 del orden de extracción) — not
-# used yet at this point in Fase 2, kept here so it's not forgotten.
-DEFAULT_TEMPLATE_FILE = "template.json"
+
+
+DEFAULT_ARPEGGIO_TEMPLATE_FILE = "template_arpeggio.json"
+DEFAULT_ICHEM_TEMPLATE_FILE = "template_ichem.json"
+
+DEFAULT_TEMPLATE_FILE = DEFAULT_ARPEGGIO_TEMPLATE_FILE
 
 ###########
 # Helpers #

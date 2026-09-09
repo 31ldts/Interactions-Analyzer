@@ -21,6 +21,7 @@ def parse_ichem_file(
     protein: bool,
     ligand: bool,
     subunit: bool,
+    interaction_list: list[str] | None = None,
 ) -> tuple[list[list[str]], dict, int, set]:
     """
     Processes an IChem interaction file's content, extracting relevant data
@@ -37,14 +38,23 @@ def parse_ichem_file(
         protein (bool): Whether to include the protein atom in the cell's atom string.
         ligand (bool): Whether to include the ligand atom in the cell's atom string.
         subunit (bool): Whether to keep subunits distinct in the residue label.
+        interaction_list (list[str] | None): Optional IChem template — an
+            ordered subset of ``INTERACTION_LABELS`` to restrict parsing to
+            (lines whose interaction isn't in this list are skipped) and to
+            use as the numeric-code order passed to ``modify_cell``. When
+            ``None`` (the default, and the pre-template behavior), every
+            line is kept and codes follow ``INTERACTION_LABELS``.
 
     Returns:
         tuple[list[list[str]], dict, int, set]: Updated ``(matrix, aa, cont, subunits_set)``.
     """
+    labels = interaction_list if interaction_list is not None else INTERACTION_LABELS
     for line in content:
         elements = line.split(GROUP_DELIM)
         if len(elements) == 10:
             interaction = elements[0].strip().replace("\t", "")
+            if interaction_list is not None and interaction not in interaction_list:
+                continue
             residue = elements[3].strip().replace("\t", "")
             if validate_string(residue):
                 if not subunit:
@@ -77,6 +87,6 @@ def parse_ichem_file(
                     text=matrix[column][index],
                     interaction=interaction,
                     atoms=atoms,
-                    interaction_labels=INTERACTION_LABELS,
+                    interaction_labels=labels,
                 )
     return matrix, aa, cont, subunits_set
