@@ -96,6 +96,104 @@ def validate_string(input_string: str) -> bool:
     return bool(re.match(pattern, input_string))
 
 
+def is_raw_arpeggio_record(record: dict) -> bool:
+    """
+    Tells apart the two Arpeggio-family JSON schemas ``analyze_files`` now
+    accepts, at the level of a single interaction record.
+
+    - "raw" schema: the original Arpeggio output (``bgn``/``end``, ``contact``,
+      ``type``, ``interacting_entities``). This field is only ever present here.
+    - "processed" schema: PDBe-API exports (``ligand_atoms``, ``interaction_type``,
+      ``interaction_details``, ``end``). Never has ``interacting_entities``.
+
+    Args:
+        record (dict): A single interaction record, already unwrapped from
+            whatever container ``flatten_arpeggio_content`` found it in.
+
+    Returns:
+        bool: True if ``record`` follows the raw Arpeggio schema.
+    """
+    return "interacting_entities" in record
+
+
+def parse_ligand_key(key: str) -> dict:
+    """
+    Parses a PDBe-API-style ligand key (e.g. ``"A_954_A3M"``) into a ligand
+    context dict, used when a "processed"-schema JSON is keyed by ligand
+    instead of carrying the ligand identity on each interaction record.
+
+    Args:
+        key (str): Dict key of the form ``"{chain_id}_{residue_number}_{chem_comp_id}"``.
+
+    Returns:
+        dict: ``{"chain_id": str, "author_residue_number": int, "chem_comp_id": str}``,
+        matching the field names used in a record's ``"end"`` dict so both can be
+        handled uniformly downstream.
+
+    Raises:
+        ValueError: If ``key`` doesn't have at least the three expected parts.
+    """
+    parts = key.split("_")
+    if len(parts) < 3:
+        raise ValueError(f"Unrecognized ligand key format: {key!r} (expected 'CHAIN_RESNUM_CODE').")
+    chain_id, residue_number = parts[0], parts[1]
+    chem_comp_id = "_".join(parts[2:])  # ligand codes can themselves contain '_'
+    return {
+        "chain_id": chain_id,
+        "author_residue_number": int(residue_number),
+        "chem_comp_id": chem_comp_id,
+    }
+
+
+def flatten_arpeggio_content(content) -> list[tuple[dict, dict | None]]:
+    """
+    Normalizes any of the JSON shapes accepted by Arpeggio-mode ``analyze_files``
+    into a flat list of ``(interaction_record, ligand_context)`` pairs, so both
+    parsers (raw-schema and processed-schema) can work off a single flat list
+    regardless of how the source file wraps its records.
+
+    Three shapes are recognized:
+
+    - ``list[dict]``: the original, unwrapped Arpeggio output. Every record is
+      self-contained (``bgn``/``end`` both identify their own residue/atom), so
+      ``ligand_context`` is always ``None`` here.
+    - ``dict[str, list[dict]]``: a PDBe-API export keyed by ligand, e.g.
+      ``{"A_954_A3M": [...]}``. ``ligand_context`` is parsed from the key via
+      ``parse_ligand_key``.
+    - ``dict[str, list[dict]]`` where each list entry is itself
+      ``{"ligand": {...}, "interactions": [...]}`` (a PDBe-API export keyed by
+      PDB id instead of by ligand). ``ligand_context`` is the nested ``"ligand"``
+      dict.
+
+    Args:
+        content: Parsed JSON content of one interaction file, in any of the
+            three shapes above.
+
+    Returns:
+        list[tuple[dict, dict | None]]: Flattened ``(record, ligand_context)``
+        pairs, in file order. Each ``record`` still carries whichever schema
+        (raw/processed) it originally had — use ``is_raw_arpeggio_record`` to
+        tell them apart before parsing.
+    """
+    if isinstance(content, list):
+        return [(record, None) for record in content]
+
+    flat: list[tuple[dict, dict | None]] = []
+    for key, entries in content.items():
+        if not entries:
+            continue
+        if "interactions" in entries[0]:
+            # dict[pdb_id] -> [{"ligand": ..., "interactions": [...]}, ...]
+            for entry in entries:
+                ligand_context = entry["ligand"]
+                flat.extend((record, ligand_context) for record in entry["interactions"])
+        else:
+            # dict[ligand_key] -> [interaction_record, ...]
+            ligand_context = parse_ligand_key(key)
+            flat.extend((record, ligand_context) for record in entries)
+    return flat
+
+
 def get_protein_ligand(begin: dict, end: dict, amino_acid_codes: list[str]) -> tuple[dict, dict]:
     """
     Determines which of the two interacting atoms (`begin`, `end`) belongs

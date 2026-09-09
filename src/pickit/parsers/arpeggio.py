@@ -10,7 +10,7 @@ through closure.
 """
 
 from ..constants import ARPEGGIO_CONT, ARPEGGIO_INT_ENT, ARPEGGIO_TYPE
-from .common import get_protein_ligand, modify_cell
+from .common import get_protein_ligand, is_raw_arpeggio_record, modify_cell
 
 
 def parse_arpeggio_file(
@@ -233,5 +233,114 @@ def parse_arpeggio_file_template(
                             interaction_labels=interaction_list,
                         )
                 break
+
+    return matrix, ligand_code, aa, cont, subunits_set
+
+
+def parse_arpeggio_file_pdbe_template(
+    records: list[tuple[dict, dict]],
+    index: int,
+    files: list[str],
+    subunits_set: set,
+    cont: int,
+    matrix: list[list[str]],
+    aa: dict,
+    exclude_rules: list[dict],
+    interaction_list: list[str],
+    protein: bool,
+    ligand: bool,
+    subunit: bool,
+) -> tuple[list[list[str]], str, dict, int, set]:
+    """
+    Processes the "processed"-schema PDBe-API Arpeggio export, restricted
+    by a template's exclude rules and interaction vocabulary.
+
+    Args:
+        records (list[tuple[dict, dict]]): Flattened ``(record, ligand_context)``
+            pairs. Records still following the raw schema (``is_raw_arpeggio_record``
+            is True) are skipped — those are handled by ``parse_arpeggio_file_template``
+            instead, since a directory can mix files of both schemas.
+        index (int): Column index for this file within the overall matrix.
+        files (list[str]): All filenames being processed (used only to size new rows).
+        subunits_set (set): Accumulator of subunit identifiers seen so far.
+        cont (int): Next free row index to assign to a newly-seen residue.
+        matrix (list[list[str]]): The in-progress interaction matrix (rows = residues).
+        aa (dict): Residue name -> row index, built up across files.
+        exclude_rules (list[dict]): Rules (matched the same way as the raw
+            template, via structural comparison) whose match causes a record
+            to be dropped. Defaults to filtering out water
+            (``end.chem_comp_id == "HOH"``) when the template's ``processed``
+            section doesn't define this.
+        interaction_list (list[str]): Interaction-type vocabulary and numeric-code
+            order. Shared with the raw-schema template so raw and processed files
+            land in the same code space when a directory mixes both.
+        protein (bool): Whether to include the protein atom(s) in the cell's atom string.
+        ligand (bool): Whether to include the ligand atom(s) in the cell's atom string.
+        subunit (bool): Whether to keep subunits distinct in the residue label.
+
+    Returns:
+        tuple[list[list[str]], str, dict, int, set]:
+            Updated ``(matrix, ligand_code, aa, cont, subunits_set)``.
+    """
+    ligand_code = None
+    for record, ligand_context in records:
+        if is_raw_arpeggio_record(record):
+            continue
+
+        if any(_matches_template(record, rule) for rule in exclude_rules):
+            continue
+
+        contact = set()
+        details = record.get("interaction_details")
+        if isinstance(details, list):
+            contact.update(d for d in details if d in interaction_list)
+        elif details in interaction_list:
+            contact.add(details)
+
+        itype = record.get("interaction_type")
+        if isinstance(itype, list):
+            contact.update(t for t in itype if t in interaction_list)
+        elif itype in interaction_list:
+            contact.add(itype)
+
+        prot_end = record["end"]
+        residue = f'{prot_end["chem_comp_id"]} {prot_end["author_residue_number"]}'
+        prot_atom = ",".join(prot_end.get("atom_names", []))
+        prot_subunit = prot_end["chain_id"]
+        ligand_code = ligand_context["chem_comp_id"]
+        lig_atom = ",".join(record.get("ligand_atoms", []))
+
+        subunits_set.add(prot_subunit)
+        atoms = (
+            f"{prot_atom}-{lig_atom}"
+            if protein and ligand
+            else prot_atom
+            if protein
+            else lig_atom
+            if ligand
+            else ""
+        )
+
+        if subunit:
+            residue += "-" + prot_subunit
+        else:
+            atoms += f"({prot_subunit})"
+
+        if residue not in aa:
+            aa[residue] = cont
+            cont += 1
+        column = aa[residue]
+
+        # Ensure matrix size and modify cell
+        if len(matrix) <= column:
+            matrix.append([""] * len(files))
+
+        for interaction in contact:
+            matrix[column][index] = modify_cell(
+                text=matrix[column][index],
+                interaction=interaction,
+                atoms=atoms,
+                interaction_labels=interaction_list,
+            )
 
     return matrix, ligand_code, aa, cont, subunits_set

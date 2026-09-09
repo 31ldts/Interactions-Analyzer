@@ -109,4 +109,4 @@ def activity_csv():
 
 @pytest.fixture
 def template_path():
-    return os.path.join(PROJECT_ROOT, "src", "pickit", "template.json")
+    return os.path.join(PROJECT_ROOT, "src", "pickit", "template_arpeggio.json")

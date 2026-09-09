@@ -32,7 +32,8 @@ from .constants import (
     ARPEGGIO_CONT,
     ARPEGGIO_TYPE,
     COLORS,
-    DEFAULT_TEMPLATE_FILE,
+    DEFAULT_ARPEGGIO_TEMPLATE_FILE,
+    DEFAULT_ICHEM_TEMPLATE_FILE,
     DIFF_DELIM,
     GROUP_DELIM,
     INTERACTION_LABELS,
@@ -41,8 +42,14 @@ from .constants import (
 )
 from .exceptions import FileOrDirectoryException, InvalidColorException, InvalidModeException
 from .models import InteractionData
-from .parsers.arpeggio import parse_arpeggio_file, parse_arpeggio_file_template
+from .parsers.arpeggio import parse_arpeggio_file, parse_arpeggio_file_pdbe_template, parse_arpeggio_file_template
+from .parsers.common import flatten_arpeggio_content, is_raw_arpeggio_record
 from .parsers.ichem import parse_ichem_file
+
+# Fallback used whenever a "processed"-schema file is analyzed without a
+# template defining its own `processed.exclude` rules (no template at all,
+# or an old-style bare-list template with no `processed` section).
+_DEFAULT_PROCESSED_EXCLUDE_RULES = [{"end": {"chem_comp_id": "HOH"}}]
 
 
 class IOMixin:
@@ -548,13 +555,15 @@ class IOMixin:
         if template_file is not None:
             # Explicit override always wins, regardless of the bundled default.
             template_file = os.path.join(self.input_directory, template_file)
-        elif mode == self.ARPEGGIO:
+        elif mode in (self.ARPEGGIO, self.ICHEM):
             # No template_file given: fall back to the template bundled with
-            # the package (constants.DEFAULT_TEMPLATE_FILE), but only if it's
-            # actually present — this default must never be required or fail
-            # silently in an unexpected way; if it's missing, behave exactly
-            # as before (no template restriction at all).
-            bundled_default = os.path.join(os.path.dirname(__file__), DEFAULT_TEMPLATE_FILE)
+            # the package for this mode (constants.DEFAULT_ARPEGGIO_TEMPLATE_FILE
+            # / DEFAULT_ICHEM_TEMPLATE_FILE), but only if it's actually present
+            # — this default must never be required or fail silently in an
+            # unexpected way; if it's missing, behave exactly as before (no
+            # template restriction at all).
+            default_name = DEFAULT_ARPEGGIO_TEMPLATE_FILE if mode == self.ARPEGGIO else DEFAULT_ICHEM_TEMPLATE_FILE
+            bundled_default = os.path.join(os.path.dirname(__file__), default_name)
             if os.path.isfile(bundled_default):
                 template_file = bundled_default
 
@@ -575,12 +584,35 @@ class IOMixin:
         failed_files = []
 
         interaction_list = None
-        if template_file is not None:
+        raw_rules = None
+        exclude_rules = None
+        global_order = ARPEGGIO_CONT[:2] + ARPEGGIO_TYPE + ARPEGGIO_CONT[2:]
+        if template_file is not None and mode == self.ARPEGGIO:
             with open(template_file) as f:
                 template = json.load(f)
-            # Get set of interactions from the template
+
+            # Backward compatibility: a template.json from before "processed"
+            # support existed is a bare list of raw-schema rules. Treat it as
+            # the "raw" section of the new dict shape, with no
+            # "processed" section (so the default exclude-water rule applies
+            # to any processed-schema file the template is used against).
+            if isinstance(template, list):
+                template = {"raw": template, "processed": None}
+
+            raw_rules = template.get("raw") or []
+            processed_cfg = template.get("processed")
+            exclude_rules = (
+                processed_cfg["exclude"]
+                if processed_cfg and processed_cfg.get("exclude") is not None
+                else _DEFAULT_PROCESSED_EXCLUDE_RULES
+            )
+
+            # Get set of interactions from the template's raw rules. This
+            # vocabulary is shared with processed-schema files too, so that
+            # raw and processed files land in the same numeric-code space when
+            # a directory mixes both.
             interaction_set = set()
-            for entry in template:
+            for entry in raw_rules:
                 for field in ("contact", "type"):
                     if field in entry and entry[field] is not None:
                         if isinstance(entry[field], str):
@@ -588,11 +620,20 @@ class IOMixin:
                         else:
                             for interaction in entry[field]:
                                 interaction_set.add(interaction)
-            interaction_list = list(interaction_set)
-            global_order = ARPEGGIO_CONT[:2] + ARPEGGIO_TYPE + ARPEGGIO_CONT[2:]
             # Filtra solo los que están presentes en el set y mantén el orden de global_order
             interaction_list = [item for item in global_order if item in interaction_set]
-            # interaction_list.sort(key=lambda s: (s.lower(), s.islower()))
+            if not interaction_list:
+                # No raw rules defined -> fall back to the full vocabulary
+                # instead of silently dropping every interaction.
+                interaction_list = global_order
+        elif template_file is not None and mode == self.ICHEM:
+            # IChem's template is much simpler than Arpeggio's: just an
+            # ordered list of allowed interaction-label strings.
+            # No raw/processed split and no structural matching needed,
+            # since an IChem line carries a single interaction-type string
+            # rather than a nested record.
+            with open(template_file) as f:
+                interaction_list = json.load(f)
 
         # Analyze each file in the directory
         for index, file in enumerate(files):
@@ -612,38 +653,66 @@ class IOMixin:
                         protein=protein,
                         ligand=ligand,
                         subunit=subunit,
+                        interaction_list=interaction_list,
                     )
                     ligands[index] = file.replace(".txt", "").upper()
                 elif mode == self.ARPEGGIO:
-                    if template_file is not None:
-                        matrix, ligand_code, aa, cont, subunits_set = parse_arpeggio_file_template(
-                            content=content,
-                            index=index,
-                            files=files,
-                            subunits_set=subunits_set,
-                            cont=cont,
-                            matrix=matrix,
-                            aa=aa,
-                            template=template,
-                            interaction_list=interaction_list,
-                            protein=protein,
-                            ligand=ligand,
-                            subunit=subunit,
-                            amino_acid_codes=self.aa,
-                        )
+                    # Normalize whatever shape this file's JSON has (plain
+                    # Arpeggio list, PDBe-API dict-by-ligand, or PDBe-API
+                    # dict-by-PDB-id) into a flat list of (record, ligand
+                    # context) pairs, then dispatch on the schema of the
+                    # first record. This lets a single `directory` mix files
+                    # from different pipelines without the user having to
+                    # tell them apart.
+                    flat_records = flatten_arpeggio_content(content)
+                    schema_is_raw = bool(flat_records) and is_raw_arpeggio_record(flat_records[0][0])
+
+                    if schema_is_raw:
+                        raw_content = [record for record, _ in flat_records]
+                        if template_file is not None:
+                            matrix, ligand_code, aa, cont, subunits_set = parse_arpeggio_file_template(
+                                content=raw_content,
+                                index=index,
+                                files=files,
+                                subunits_set=subunits_set,
+                                cont=cont,
+                                matrix=matrix,
+                                aa=aa,
+                                template=raw_rules,
+                                interaction_list=interaction_list,
+                                protein=protein,
+                                ligand=ligand,
+                                subunit=subunit,
+                                amino_acid_codes=self.aa,
+                            )
+                        else:
+                            matrix, ligand_code, aa, cont, subunits_set = parse_arpeggio_file(
+                                content=raw_content,
+                                index=index,
+                                files=files,
+                                subunits_set=subunits_set,
+                                cont=cont,
+                                matrix=matrix,
+                                aa=aa,
+                                protein=protein,
+                                ligand=ligand,
+                                subunit=subunit,
+                                amino_acid_codes=self.aa,
+                            )
                     else:
-                        matrix, ligand_code, aa, cont, subunits_set = parse_arpeggio_file(
-                            content=content,
+                        matrix, ligand_code, aa, cont, subunits_set = parse_arpeggio_file_pdbe_template(
+                            records=flat_records,
                             index=index,
                             files=files,
                             subunits_set=subunits_set,
                             cont=cont,
                             matrix=matrix,
                             aa=aa,
+                            exclude_rules=exclude_rules or _DEFAULT_PROCESSED_EXCLUDE_RULES,
+                            interaction_list=interaction_list or global_order,
                             protein=protein,
                             ligand=ligand,
                             subunit=subunit,
-                            amino_acid_codes=self.aa,
                         )
                     files[index] = file.replace(".json", "").upper()
                     ligands[index] = ligand_code

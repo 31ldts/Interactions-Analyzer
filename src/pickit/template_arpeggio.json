@@ -1,0 +1,23 @@
+{
+    "raw": [
+        {
+            "contact": [
+                "covalent", "hbond", "aromatic", "hydrophobic", "polar", "ionic", "xbond", "metal",
+                "carbonyl", "CARBONPI", "CATIONPI", "DONORPI", "HALOGENPI", "METSULPHURPI",
+                "AMIDEAMIDE", "AMIDERING", "weak_hbond", "weak_polar"
+            ],
+            "interacting_entities": "INTER",
+            "type": null
+        },
+        {
+            "contact": null,
+            "interacting_entities": "INTER",
+            "type": "plane-plane"
+        }
+    ],
+    "processed": {
+        "exclude": [
+            { "end": { "chem_comp_id": "HOH" } }
+        ]
+    }
+}

@@ -1,0 +1,12 @@
+[
+    "Hydrophobic",
+    "Aromatic_Face/Face",
+    "Aromatic_Edge/Face",
+    "HBond_PROT",
+    "HBond_LIG",
+    "Ionic_PROT",
+    "Ionic_LIG",
+    "Metal Acceptor",
+    "Pi/Cation",
+    "Other_Interactions"
+]
